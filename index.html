@@ -3,199 +3,30 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MP3 Cover Adder</title>
+  <title>MP4 → MP3 (PWA)</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icons/icon-192.png" />
   <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; max-width:900px; margin:20px auto; padding:0 16px; color:#111; }
-    h1 { font-size:1.25rem; margin-bottom:.25rem; }
-    .row { display:flex; gap:12px; align-items:center; margin:10px 0; flex-wrap:wrap; }
-    label { display:block; font-weight:600; margin-bottom:6px; }
-    input[type=file] { padding:6px 0; }
-    .drop { border:2px dashed #ccc; padding:18px; border-radius:8px; text-align:center; color:#666; background:#fafafa; }
-    button { background:#0b6efd; color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; }
-    button[disabled] { opacity:.5; cursor:not-allowed; }
-    #preview img { max-width:160px; max-height:160px; display:block; margin-top:8px; border-radius:6px; }
-    #progress { margin-top:8px; color:#333; }
-    .small { font-size:.9rem; color:#555; }
-    a.download { display:inline-block; margin-top:8px; }
+    body { font-family: system-ui, Arial; padding: 1rem; max-width: 720px; margin: auto; }
+    .hidden { display:none; }
+    button { padding: .6rem 1rem; font-size: 1rem; }
+    #log { white-space:pre-wrap; font-family: monospace; background:#f7f7f7; padding: .5rem; margin-top: .5rem; max-height: 200px; overflow:auto;}
   </style>
 </head>
 <body>
-  <h1>MP3 Cover Adder (in-browser)</h1>
-  <p class="small">Select one or more MP3 files and an image (JPEG/PNG). The site will embed the image as ID3v2 cover art and let you download the modified files.</p>
+  <h1>MP4 → MP3</h1>
+  <p>Share an MP4 from Files by Google to this app, or choose a file directly.</p>
 
-  <div>
-    <label for="mp3Files">Choose MP3 file(s)</label>
-    <div id="mp3Drop" class="drop">Drop MP3 files here or <input id="mp3Files" type="file" accept=".mp3,audio/mpeg" multiple style="display:inline-block; margin-left:8px;"></div>
+  <input id="fileInput" type="file" accept="video/*" />
+  <div style="margin-top:.5rem;">
+    <button id="convertBtn" disabled>Convert to MP3</button>
+    <a id="downloadLink" class="hidden">Download MP3</a>
   </div>
 
-  <div style="margin-top:12px;">
-    <label for="imageFile">Choose cover image</label>
-    <input id="imageFile" type="file" accept="image/*">
-    <div id="preview"></div>
-  </div>
+  <div id="status" style="margin-top:.75rem;"></div>
+  <div id="log"></div>
 
-  <div class="row" style="margin-top:14px;">
-    <button id="processBtn">Embed cover art</button>
-    <div id="progress" class="small"></div>
-  </div>
-
-  <div id="results"></div>
-
-  <!-- Libraries: browser-id3-writer and JSZip -->
-  <script src="https://unpkg.com/browser-id3-writer@4.0.0/dist/id3-writer.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-
-  <script>
-    // Elements
-    const mp3Input = document.getElementById('mp3Files');
-    const imageInput = document.getElementById('imageFile');
-    const preview = document.getElementById('preview');
-    const processBtn = document.getElementById('processBtn');
-    const progressEl = document.getElementById('progress');
-    const results = document.getElementById('results');
-    const mp3Drop = document.getElementById('mp3Drop');
-
-    // Drag & drop support for MP3s
-    ['dragenter','dragover'].forEach(e => {
-      mp3Drop.addEventListener(e, ev => {
-        ev.preventDefault();
-        mp3Drop.style.borderColor = '#0b6efd';
-      });
-    });
-    ['dragleave','drop'].forEach(e => {
-      mp3Drop.addEventListener(e, ev => {
-        ev.preventDefault();
-        mp3Drop.style.borderColor = '#ccc';
-      });
-    });
-    mp3Drop.addEventListener('drop', ev => {
-      ev.preventDefault();
-      const files = Array.from(ev.dataTransfer.files).filter(f => f.type === 'audio/mpeg' || f.name.toLowerCase().endsWith('.mp3'));
-      if (files.length) mp3Input.files = fileListFromArray(files);
-    });
-
-    // helper to create a FileList for input
-    function fileListFromArray(files) {
-      const dataTransfer = new DataTransfer();
-      files.forEach(f => dataTransfer.items.add(f));
-      return dataTransfer.files;
-    }
-
-    // preview image
-    imageInput.addEventListener('change', () => {
-      preview.innerHTML = '';
-      const f = imageInput.files && imageInput.files[0];
-      if (!f) return;
-      const img = document.createElement('img');
-      img.alt = 'Cover preview';
-      img.src = URL.createObjectURL(f);
-      img.onload = () => URL.revokeObjectURL(img.src);
-      preview.appendChild(img);
-    });
-
-    processBtn.addEventListener('click', async () => {
-      results.innerHTML = '';
-      progressEl.textContent = '';
-      const mp3Files = mp3Input.files && Array.from(mp3Input.files);
-      const imageFile = imageInput.files && imageInput.files[0];
-
-      if (!mp3Files || mp3Files.length === 0) {
-        progressEl.textContent = 'Please choose at least one MP3 file.';
-        return;
-      }
-      if (!imageFile) {
-        progressEl.textContent = 'Please choose an image to embed.';
-        return;
-      }
-
-      processBtn.disabled = true;
-      try {
-        progressEl.textContent = 'Reading image...';
-        const imageArrayBuffer = await imageFile.arrayBuffer();
-        const imageMime = imageFile.type || guessImageMime(imageFile.name);
-
-        // If single file, allow direct single download; if multiple, zip
-        const multiple = mp3Files.length > 1;
-        let zip;
-        if (multiple) {
-          zip = new JSZip();
-        }
-
-        for (let i = 0; i < mp3Files.length; i++) {
-          const mp3 = mp3Files[i];
-          progressEl.textContent = `Processing ${i+1}/${mp3Files.length}: ${mp3.name}...`;
-          try {
-            const mp3Buf = await mp3.arrayBuffer();
-
-            // Use ID3Writer to write APIC frame
-            const writer = new ID3Writer(new Uint8Array(mp3Buf).buffer);
-            writer.setFrame('APIC', {
-              type: 3,
-              data: imageArrayBuffer,
-              description: 'Cover',
-              mime: imageMime
-            });
-
-            // (Optional) preserve existing tags like title/artist? We don't overwrite them here.
-            writer.addTag();
-            const taggedBlob = writer.getBlob();
-
-            const outName = makeOutName(mp3.name);
-
-            if (multiple) {
-              zip.file(outName, taggedBlob);
-            } else {
-              // single: provide download link
-              const url = URL.createObjectURL(taggedBlob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = outName;
-              a.textContent = `Download ${outName}`;
-              a.className = 'download';
-              results.appendChild(a);
-            }
-          } catch (err) {
-            console.error('Error processing', mp3.name, err);
-            const e = document.createElement('div');
-            e.textContent = `Error processing ${mp3.name}: ${err.message || err}`;
-            results.appendChild(e);
-          }
-        }
-
-        if (multiple) {
-          progressEl.textContent = 'Generating ZIP...';
-          const zipBlob = await zip.generateAsync({ type: 'blob' }, meta => {
-            progressEl.textContent = `Zipping... ${Math.round(meta.percent)}%`;
-          });
-          const url = URL.createObjectURL(zipBlob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `mp3-with-covers.zip`;
-          a.textContent = `Download ZIP with ${mp3Files.length} files`;
-          a.className = 'download';
-          results.appendChild(a);
-        }
-
-        progressEl.textContent = 'Done.';
-        results.appendChild(document.createElement('br'));
-        results.appendChild(document.createElement('div'));
-        results.appendChild(document.createTextNode('Tip: On Android, save the downloaded file(s) into a Music or Downloads folder; Files/Files by Google should pick up the updated artwork. If an app doesn’t refresh immediately, try restarting the app or run a media scan tool.'));
-      } finally {
-        processBtn.disabled = false;
-      }
-    });
-
-    function makeOutName(name) {
-      if (!name.toLowerCase().endsWith('.mp3')) return name + '.mp3';
-      return name.replace(/\.mp3$/i, '-with-cover.mp3');
-    }
-
-    function guessImageMime(name) {
-      const n = name.toLowerCase();
-      if (n.endsWith('.png')) return 'image/png';
-      if (n.endsWith('.webp')) return 'image/webp';
-      return 'image/jpeg';
-    }
-  </script>
+  <script src="idb.js"></script>
+  <script type="module" src="main.js"></script>
 </body>
 </html>
