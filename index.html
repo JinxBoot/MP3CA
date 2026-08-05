@@ -3,30 +3,257 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MP4 → MP3 (PWA)</title>
-  <link rel="manifest" href="/manifest.json" />
-  <link rel="icon" href="/icons/icon-192.png" />
+  <title>MP3 Cover Adder</title>
   <style>
-    body { font-family: system-ui, Arial; padding: 1rem; max-width: 720px; margin: auto; }
-    .hidden { display:none; }
-    button { padding: .6rem 1rem; font-size: 1rem; }
-    #log { white-space:pre-wrap; font-family: monospace; background:#f7f7f7; padding: .5rem; margin-top: .5rem; max-height: 200px; overflow:auto;}
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; max-width:900px; margin:20px auto; padding:0 16px; color:#111; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    h1 { font-size:1.25rem; margin:0; }
+    .row { display:flex; gap:12px; align-items:center; margin:10px 0; flex-wrap:wrap; }
+    label { display:block; font-weight:600; margin-bottom:6px; }
+    input[type=file] { padding:6px 0; }
+    .drop { border:2px dashed #ccc; padding:18px; border-radius:8px; text-align:center; color:#666; background:#fafafa; flex:1; min-width:220px; }
+    button { background:#0b6efd; color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; }
+    button[disabled] { opacity:.5; cursor:not-allowed; }
+    #preview img { max-width:160px; max-height:160px; display:block; margin-top:8px; border-radius:6px; }
+    #progress { margin-top:8px; color:#333; }
+    .small { font-size:.9rem; color:#555; }
+    a.download { display:inline-block; margin-top:8px; }
+    .external-links { display:flex; gap:8px; align-items:center; }
+    .store-btn { display:inline-flex; gap:8px; align-items:center; padding:8px 10px; background:#222; color:#fff; border-radius:8px; text-decoration:none; }
+    .store-btn.secondary { background:#f6f6f6; color:#111; border:1px solid #ddd; }
+    .note { background:#fffbe6; padding:10px; border-radius:8px; border:1px solid #ffe58f; color:#665500; }
   </style>
 </head>
 <body>
-  <h1>MP4 → MP3</h1>
-  <p>Share an MP4 from Files by Google to this app, or choose a file directly.</p>
+  <header>
+    <div>
+      <h1>MP3 Cover Adder (in-browser) — V1 restored</h1>
+      <div class="small">Select MP3(s) and an image; the page embeds the image as ID3v2 cover art and lets you download modified files. M4A files are accepted (see note).</div>
+    </div>
 
-  <input id="fileInput" type="file" accept="video/*" />
-  <div style="margin-top:.5rem;">
-    <button id="convertBtn" disabled>Convert to MP3</button>
-    <a id="downloadLink" class="hidden">Download MP3</a>
+    <div class="external-links">
+      <!-- Play Store link -->
+      <a class="store-btn" href="https://play.google.com/store/apps/details?id=com.google.android.apps.nbu.files" target="_blank" rel="noopener noreferrer">
+        Files by Google (Play Store)
+      </a>
+
+      <!-- market:// intent link for Android devices (will open Play Store app when supported) -->
+      <a class="store-btn secondary" href="market://details?id=com.google.android.apps.nbu.files" id="marketLink">
+        Open in Play Store app
+      </a>
+    </div>
+  </header>
+
+  <p class="note">Note: This page embeds artwork into MP3 files (ID3v2 APIC). M4A (.m4a / AAC in MP4 container) files are accepted for selection and will be included in the output unchanged for now — reply if you want M4A 'covr' embedding (I can add MP4 atom editing to write the cover into the M4A).</p>
+
+  <div>
+    <label for="mp3Files">Choose audio file(s) (MP3 and M4A allowed)</label>
+    <div id="mp3Drop" class="drop">Drop MP3 or M4A files here or <input id="mp3Files" type="file" accept=".mp3,audio/mpeg,.m4a,audio/mp4" multiple style="display:inline-block; margin-left:8px;"></div>
   </div>
 
-  <div id="status" style="margin-top:.75rem;"></div>
-  <div id="log"></div>
+  <div style="margin-top:12px;">
+    <label for="imageFile">Choose cover image</label>
+    <input id="imageFile" type="file" accept="image/*">
+    <div id="preview"></div>
+  </div>
 
-  <script src="idb.js"></script>
-  <script type="module" src="main.js"></script>
+  <div class="row" style="margin-top:14px;">
+    <button id="processBtn">Embed cover art into MP3(s)</button>
+    <div id="progress" class="small"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <!-- Libraries: browser-id3-writer and JSZip -->
+  <script src="https://unpkg.com/browser-id3-writer@4.0.0/dist/id3-writer.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <script>
+    // Elements
+    const mp3Input = document.getElementById('mp3Files');
+    const imageInput = document.getElementById('imageFile');
+    const preview = document.getElementById('preview');
+    const processBtn = document.getElementById('processBtn');
+    const progressEl = document.getElementById('progress');
+    const results = document.getElementById('results');
+    const mp3Drop = document.getElementById('mp3Drop');
+
+    // Drag & drop support for MP3s/M4As
+    ['dragenter','dragover'].forEach(e => {
+      mp3Drop.addEventListener(e, ev => {
+        ev.preventDefault();
+        mp3Drop.style.borderColor = '#0b6efd';
+      });
+    });
+    ['dragleave','drop'].forEach(e => {
+      mp3Drop.addEventListener(e, ev => {
+        ev.preventDefault();
+        mp3Drop.style.borderColor = '#ccc';
+      });
+    });
+    mp3Drop.addEventListener('drop', ev => {
+      ev.preventDefault();
+      const files = Array.from(ev.dataTransfer.files).filter(f => isSupportedAudio(f));
+      if (files.length) mp3Input.files = fileListFromArray(files);
+    });
+
+    // helper to create a FileList for input
+    function fileListFromArray(files) {
+      const dataTransfer = new DataTransfer();
+      files.forEach(f => dataTransfer.items.add(f));
+      return dataTransfer.files;
+    }
+
+    function isSupportedAudio(f) {
+      const name = (f.name || '').toLowerCase();
+      const t = (f.type || '').toLowerCase();
+      return t === 'audio/mpeg' || name.endsWith('.mp3') || t === 'audio/mp4' || name.endsWith('.m4a') || name.endsWith('.mp4');
+    }
+
+    // preview image
+    imageInput.addEventListener('change', () => {
+      preview.innerHTML = '';
+      const f = imageInput.files && imageInput.files[0];
+      if (!f) return;
+      const img = document.createElement('img');
+      img.alt = 'Cover preview';
+      img.src = URL.createObjectURL(f);
+      img.onload = () => URL.revokeObjectURL(img.src);
+      preview.appendChild(img);
+    });
+
+    processBtn.addEventListener('click', async () => {
+      results.innerHTML = '';
+      progressEl.textContent = '';
+      const files = mp3Input.files && Array.from(mp3Input.files);
+      const imageFile = imageInput.files && imageInput.files[0];
+
+      if (!files || files.length === 0) {
+        progressEl.textContent = 'Please choose at least one audio file.';
+        return;
+      }
+      if (!imageFile) {
+        progressEl.textContent = 'Please choose an image to embed.';
+        return;
+      }
+
+      processBtn.disabled = true;
+      try {
+        progressEl.textContent = 'Reading image...';
+        const imageArrayBuffer = await imageFile.arrayBuffer();
+        const imageMime = imageFile.type || guessImageMime(imageFile.name);
+
+        // Separate MP3s and M4As
+        const mp3Files = files.filter(f => f.type === 'audio/mpeg' || f.name.toLowerCase().endsWith('.mp3'));
+        const m4aFiles = files.filter(f => !(f.type === 'audio/mpeg' || f.name.toLowerCase().endsWith('.mp3')));
+
+        const multiple = files.length > 1;
+        let zip;
+        if (multiple) { zip = new JSZip(); }
+
+        // Process MP3 files (write ID3 APIC)
+        for (let i = 0; i < mp3Files.length; i++) {
+          const mp3 = mp3Files[i];
+          progressEl.textContent = `Processing MP3 ${i+1}/${mp3Files.length}: ${mp3.name}...`;
+          try {
+            const mp3Buf = await mp3.arrayBuffer();
+
+            // Use ID3Writer to write APIC frame
+            const writer = new ID3Writer(new Uint8Array(mp3Buf).buffer);
+            writer.setFrame('APIC', {
+              type: 3,
+              data: imageArrayBuffer,
+              description: 'Cover',
+              mime: imageMime
+            });
+
+            writer.addTag();
+            const taggedBlob = writer.getBlob();
+
+            const outName = makeOutName(mp3.name);
+
+            if (multiple) {
+              zip.file(outName, taggedBlob);
+            } else {
+              const url = URL.createObjectURL(taggedBlob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = outName;
+              a.textContent = `Download ${outName}`;
+              a.className = 'download';
+              results.appendChild(a);
+            }
+          } catch (err) {
+            console.error('Error processing', mp3.name, err);
+            const e = document.createElement('div');
+            e.textContent = `Error processing ${mp3.name}: ${err.message || err}`;
+            results.appendChild(e);
+          }
+        }
+
+        // Handle M4A files: currently included unchanged (no covr embedding)
+        if (m4aFiles.length) {
+          for (let j = 0; j < m4aFiles.length; j++) {
+            const f = m4aFiles[j];
+            progressEl.textContent = `Including M4A unchanged: ${f.name}...`;
+            if (multiple) {
+              // add original file to zip
+              zip.file(f.name, await f.arrayBuffer());
+            } else {
+              // single and only M4A selected: provide original file for download (unchanged)
+              const url = URL.createObjectURL(f);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = f.name;
+              a.textContent = `Download original ${f.name} (M4A unchanged)`;
+              a.className = 'download';
+              results.appendChild(a);
+            }
+          }
+
+          // Inform user about M4A status
+          const note = document.createElement('div');
+          note.className = 'small';
+          note.style.marginTop = '8px';
+          note.textContent = 'M4A files were included unchanged. Reply if you want M4A cover embedding (I can add MP4 atom editing to write the cover into the M4A).';
+          results.appendChild(note);
+        }
+
+        if (multiple) {
+          progressEl.textContent = 'Generating ZIP...';
+          const zipBlob = await zip.generateAsync({ type: 'blob' }, meta => {
+            progressEl.textContent = `Zipping... ${Math.round(meta.percent)}%`;
+          });
+          const url = URL.createObjectURL(zipBlob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `audio-with-covers.zip`;
+          a.textContent = `Download ZIP with ${files.length} files`;
+          a.className = 'download';
+          results.appendChild(a);
+        }
+
+        progressEl.textContent = 'Done.';
+        results.appendChild(document.createElement('br'));
+        results.appendChild(document.createTextNode('Tip: On Android, save the downloaded file(s) into a Music or Downloads folder; Files/Files by Google should pick up the updated artwork. If an app doesn’t refresh immediately, try restarting the app or run a media scan tool.'));
+      } finally {
+        processBtn.disabled = false;
+      }
+    });
+
+    function makeOutName(name) {
+      const lower = name.toLowerCase();
+      if (lower.endsWith('.mp3')) return name.replace(/\.mp3$/i, '-with-cover.mp3');
+      if (lower.endsWith('.m4a')) return name.replace(/\.m4a$/i, '-unchanged.m4a');
+      return name + '-with-cover';
+    }
+
+    function guessImageMime(name) {
+      const n = name.toLowerCase();
+      if (n.endsWith('.png')) return 'image/png';
+      if (n.endsWith('.webp')) return 'image/webp';
+      return 'image/jpeg';
+    }
+  </script>
 </body>
 </html>
